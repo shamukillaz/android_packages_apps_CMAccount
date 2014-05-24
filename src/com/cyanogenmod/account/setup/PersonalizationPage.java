@@ -115,7 +115,7 @@ public class PersonalizationPage extends Page {
                 }
             });
 
-            Switch useNavBar = (Switch) mRootView.findViewById(R.id.nav_buttons_switch);
+            /*Switch useNavBar = (Switch) mRootView.findViewById(R.id.nav_buttons_switch);
             boolean needsNavBar = true;
             try {
                 IWindowManager windowManager = WindowManagerGlobal.getWindowManagerService();
@@ -135,7 +135,7 @@ public class PersonalizationPage extends Page {
                         writeDisableNavkeysOption(getActivity(), isChecked);
                     }
                 });
-            }
+            }*/
 
         }
 
@@ -150,7 +150,7 @@ public class PersonalizationPage extends Page {
         }
     }
 
-    private static void writeDisableNavkeysOption(Context context, boolean enabled) {
+    /*private static void writeDisableNavkeysOption(Context context, boolean enabled) {
         final int defaultBrightness = context.getResources().getInteger(
                 com.android.internal.R.integer.config_buttonBrightnessSettingDefault);
 
@@ -166,7 +166,7 @@ public class PersonalizationPage extends Page {
                     Settings.System.BUTTON_BRIGHTNESS,
                     defaultBrightness);
         }
-    }
+    }*/
 
     protected static boolean hideKeyDisabler() {
         return !KeyDisabler.isSupported();
