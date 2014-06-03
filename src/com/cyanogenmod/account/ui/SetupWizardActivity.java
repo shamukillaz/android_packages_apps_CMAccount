@@ -16,23 +16,33 @@
 
 package com.cyanogenmod.account.ui;
 
+import android.accounts.AccountManager;
+import android.accounts.AccountManagerCallback;
+import android.accounts.AccountManagerFuture;
+import android.accounts.AuthenticatorException;
+import android.accounts.OperationCanceledException;
+import android.app.Activity;
+import android.app.AlertDialog;
+import android.app.Dialog;
+import android.app.Fragment;
+import android.app.FragmentManager;
+import android.app.Notification;
+import android.app.NotificationManager;
+import android.app.PendingIntent;
+import android.content.pm.ThemeUtils;
 import android.content.res.ThemeManager;
+import android.content.res.ThemeManager.ThemeChangeListener;
+import android.graphics.BitmapFactory;
+import android.provider.ThemesContract;
 import com.cyanogenmod.account.CMAccount;
 import com.cyanogenmod.account.R;
 import com.cyanogenmod.account.gcm.GCMUtil;
+import com.cyanogenmod.account.receiver.ApplyHexoIconsReceiver;
 import com.cyanogenmod.account.setup.*;
 import com.cyanogenmod.account.util.CMAccountUtils;
 import com.cyanogenmod.account.util.WhisperPushUtils;
 
-import android.accounts.AccountManager;
-import android.accounts.AccountManagerCallback;
-import android.accounts.AccountManagerFuture;
-import android.app.Activity;
-import android.app.AlertDialog;
 import android.app.AppGlobals;
-import android.app.Dialog;
-import android.app.Fragment;
-import android.app.FragmentManager;
 import android.content.ComponentName;
 import android.content.Context;
 import android.content.DialogInterface;
@@ -49,9 +59,11 @@ import android.util.Log;
 import android.view.View;
 import android.widget.Button;
 
+import java.io.IOException;
 import java.util.List;
 
-public class SetupWizardActivity extends Activity implements SetupDataCallbacks {
+public class SetupWizardActivity extends Activity implements SetupDataCallbacks,
+    ThemeChangeListener {
 
     private static final String TAG = SetupWizardActivity.class.getSimpleName();
 
@@ -60,6 +72,7 @@ public class SetupWizardActivity extends Activity implements SetupDataCallbacks 
     private static final String KEY_G_ACCOUNT_SHOWN = "g-account-shown";
 
     private static final int DIALOG_SIM_MISSING = 0;
+    private static final int DIALOG_FINISHING = 1;
 
     private ViewPager mViewPager;
     private CMPagerAdapter mPagerAdapter;
@@ -74,6 +87,8 @@ public class SetupWizardActivity extends Activity implements SetupDataCallbacks 
     private final Handler mHandler = new Handler();
 
     private SharedPreferences mSharedPreferences;
+    private boolean mSetupComplete = false;
+    private boolean mGoogleAccountSetupComplete = false;
 
     public void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
@@ -161,6 +176,12 @@ public class SetupWizardActivity extends Activity implements SetupDataCallbacks 
                                 dialogInterface.dismiss();
                             }
                         })
+                        .create();
+            case DIALOG_FINISHING:
+                return new AlertDialog.Builder(this)
+                        .setTitle(R.string.setup_finalizing)
+                        .setCancelable(false)
+                        .setView(getLayoutInflater().inflate(R.layout.setup_finalizing, null))
                         .create();
             default:
                 return super.onCreateDialog(id, args);
@@ -267,9 +288,8 @@ public class SetupWizardActivity extends Activity implements SetupDataCallbacks 
                             }
                             break;
                         case R.string.setup_google_account:
-                            if (accountExists(CMAccount.ACCOUNT_TYPE_GOOGLE)) {
-                                Page locationPage = getPage(R.string.setup_location);
-                                removeSetupPage(locationPage, false);
+                            if (mGoogleAccountSetupComplete) {
+                                removeSetupPage(page, false);
                             }
                             break;
                     }
@@ -355,28 +375,37 @@ public class SetupWizardActivity extends Activity implements SetupDataCallbacks 
             @Override
             public void run(AccountManagerFuture<Bundle> bundleAccountManagerFuture) {
                 if (isDestroyed()) return; //There is a change this activity has been torn down.
-                Page page = mPageList.findPage(R.string.setup_google_account);
-                if (page != null) {
-                    onPageFinished(page);
+                String token = null;
+                try {
+                    token = bundleAccountManagerFuture.getResult().getString(AccountManager.KEY_AUTHTOKEN);
+                    mGoogleAccountSetupComplete = true;
+                    Page page = mPageList.findPage(R.string.setup_google_account);
+                    if (page != null) {
+                        onPageFinished(page);
+                    }
+                } catch (OperationCanceledException e) {
+                } catch (IOException e) {
+                } catch (AuthenticatorException e) {
                 }
-                doNext();
+
             }
         }, null);
     }
 
     private void finishSetup() {
+        if (mSetupComplete) return;
+        mSetupComplete = true;
         handleWhisperPushRegistration();
-        handleDefaultThemeSetup();
+        boolean applyingDefaultTheme = handleDefaultThemeSetup();
 
         Settings.Global.putInt(getContentResolver(), Settings.Global.DEVICE_PROVISIONED, 1);
         Settings.Secure.putInt(getContentResolver(), Settings.Secure.USER_SETUP_COMPLETE, 1);
         ((CMAccount)AppGlobals.getInitialApplication()).enableStatusBar();
-        Intent intent = new Intent("android.intent.action.MAIN");
-        intent.addCategory("android.intent.category.HOME");
-        disableSetupWizards(intent);
-        intent.setFlags(Intent.FLAG_ACTIVITY_CLEAR_TASK | intent.getFlags());
-        startActivity(intent);
-        finish();
+        if (!applyingDefaultTheme)  {
+            finalizeSetup();
+        } else {
+            showDialog(DIALOG_FINISHING);
+        }
     }
 
     private boolean accountExists(String accountType) {
@@ -395,17 +424,70 @@ public class SetupWizardActivity extends Activity implements SetupDataCallbacks 
         }
     }
 
-    private void handleDefaultThemeSetup() {
+    private boolean handleDefaultThemeSetup() {
         Page page = getPage(R.string.setup_personalization);
         if (page == null) {
-            return;
+            return false;
         }
         Bundle privacyData = page.getData();
         if (privacyData != null && privacyData.getBoolean("apply_default_theme")) {
             Log.d(TAG, "Applying default theme");
             ThemeManager tm = (ThemeManager) this.getSystemService(Context.THEME_SERVICE);
+            tm.addClient(ThemeUtils.getDefaultThemePackageName(this), this);
             tm.applyDefaultTheme();
+            return true;
         }
+        return false;
+    }
+
+    @Override
+    public void onProgress(int progress) {}
+
+    @Override
+    public void onFinish(boolean isSuccess) {
+        removeDialog(DIALOG_FINISHING);
+        ThemeManager tm = (ThemeManager) this.getSystemService(Context.THEME_SERVICE);
+        tm.removeClient(ThemeUtils.getDefaultThemePackageName(this));
+
+        // add notification
+        Intent hexoInfoIntent = new Intent(Intent.ACTION_MAIN)
+                .addCategory("cyanogenmod.intent.category.APP_THEMES")
+                .putExtra("pkgName", ApplyHexoIconsReceiver.HEXO_ICONS_PACKAGE_NAME)
+                .putExtra("component_filter", ThemesContract.ThemesColumns.MODIFIES_ICONS);
+        Intent applyHexoIntent = new Intent(ApplyHexoIconsReceiver.ACTION_APPLY_HEXO_ICONS);
+        Notification.BigPictureStyle notificationStyle =
+                new Notification.BigPictureStyle().bigPicture(
+                        BitmapFactory.decodeResource(getResources(),
+                        R.drawable.hexo_icon_preview));
+
+        Notification notification = new Notification.Builder(this)
+                .setContentTitle(getString(R.string.update_icon_pack_available))
+                .setSmallIcon(R.drawable.ic_icon_notif)
+                .addAction(R.drawable.ic_learnmore,
+                        getString(R.string.cmaccount_learn_more_alt),
+                        PendingIntent.getActivity(this, 0, hexoInfoIntent, 0))
+                .addAction(R.drawable.ic_apply,
+                        getString(R.string.apply_icon_pack),
+                        PendingIntent.getBroadcast(this, 0, applyHexoIntent, 0))
+                .setStyle(notificationStyle)
+                .setShowWhen(false)
+                .setAutoCancel(false)
+                .setPriority(Notification.PRIORITY_HIGH)
+                .build();
+
+        NotificationManager nm = (NotificationManager) getSystemService(NOTIFICATION_SERVICE);
+        nm.notify(ApplyHexoIconsReceiver.HEXO_NOTIFICATION_ID, notification);
+
+        finalizeSetup();
+    }
+
+    private void finalizeSetup() {
+        Intent intent = new Intent(Intent.ACTION_MAIN);
+        intent.addCategory(Intent.CATEGORY_HOME);
+        disableSetupWizards(intent);
+        intent.addFlags(Intent.FLAG_ACTIVITY_CLEAR_TASK);
+        startActivity(intent);
+        finish();
     }
 
     private class CMPagerAdapter extends FragmentStatePagerAdapter {
